@@ -9,12 +9,11 @@
 #include "encode.hpp"
 #include "task.hpp"
 #include "utils.hpp"
-
+#include <map>
+#include <memory>
 #include <set>
 #include <stdexcept>
-
 #include <gnb/gtp/task.hpp>
-
 #include <asn/ngap/ASN_NGAP_AssociatedQosFlowItem.h>
 #include <asn/ngap/ASN_NGAP_AssociatedQosFlowList.h>
 #include <asn/ngap/ASN_NGAP_GTPTunnel.h>
@@ -45,17 +44,68 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
     std::vector<ASN_NGAP_PDUSessionResourceSetupItemSURes *> successList;
     std::vector<ASN_NGAP_PDUSessionResourceFailedToSetupItemSURes *> failedList;
 
+    auto addFailedItem = [&](int psi, NgapCause cause) {
+        auto *tr = asn::New<ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer>();
+
+        ngap_utils::ToCauseAsn_Ref(cause, tr->cause);
+
+        OctetString encodedTr = ngap_encode::EncodeS(asn_DEF_ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer, tr);
+
+        if (encodedTr.length() == 0)
+            throw std::runtime_error("PDUSessionResourceSetupUnsuccessfulTransfer encoding failed");
+
+        asn::Free(asn_DEF_ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer, tr);
+
+        auto *res = asn::New<ASN_NGAP_PDUSessionResourceFailedToSetupItemSURes>();
+        res->pDUSessionID = psi;
+        asn::SetOctetString(res->pDUSessionResourceSetupUnsuccessfulTransfer, encodedTr);
+
+        failedList.push_back(res);
+    };
+
     auto *ue = findUeByNgapIdPair(amfId, ngap_utils::FindNgapIdPair(msg));
     if (ue == nullptr)
         return;
 
     auto *ieList = asn::ngap::GetProtocolIe(msg, ASN_NGAP_ProtocolIE_ID_id_PDUSessionResourceSetupListSUReq);
+
     if (ieList)
     {
         auto &list = ieList->PDUSessionResourceSetupListSUReq.list;
+
+        std::map<int, int> psiCounts{};
+
         for (int i = 0; i < list.count; i++)
         {
-            auto &item = list.array[i];
+            auto *item = list.array[i];
+            if (item == nullptr)
+                continue;
+
+            psiCounts[static_cast<int>(item->pDUSessionID)]++;
+        }
+
+        for (int i = 0; i < list.count; i++)
+        {
+            auto *item = list.array[i];
+            if (item == nullptr)
+                continue;
+
+            int psi = static_cast<int>(item->pDUSessionID);
+
+            if (psiCounts[psi] > 1)
+            {
+                m_logger->err("PDU session resource setup failed: duplicate PDU Session ID[%d] in setup request", psi);
+                addFailedItem(psi, NgapCause::RadioNetwork_multiple_PDU_session_ID_instances);
+                continue;
+            }
+
+            if (ue->pduSessions.count(psi) != 0)
+            {
+                m_logger->err("PDU session resource setup failed: PDU Session ID[%d] is already active", psi);
+                addFailedItem(psi, NgapCause::Protocol_message_not_compatible_with_receiver_state);
+                continue;
+            }
+
             auto *transfer = ngap_encode::Decode<ASN_NGAP_PDUSessionResourceSetupRequestTransfer>(
                 asn_DEF_ASN_NGAP_PDUSessionResourceSetupRequestTransfer, item->pDUSessionResourceSetupRequestTransfer);
             if (transfer == nullptr)
@@ -66,8 +116,7 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
                 continue;
             }
 
-            auto *resource = new PduSessionResource(ue->ctxId, static_cast<int>(item->pDUSessionID));
-
+            auto resource = std::make_unique<PduSessionResource>(ue->ctxId, psi);
             auto *ie = asn::ngap::GetProtocolIe(transfer, ASN_NGAP_ProtocolIE_ID_id_PDUSessionAggregateMaximumBitRate);
             if (ie)
             {
@@ -106,34 +155,23 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
                 resource->qosFlows = asn::WrapUnique(ptr, asn_DEF_ASN_NGAP_QosFlowSetupRequestList);
             }
 
-            auto error = setupPduSessionResource(ue, resource);
+            auto *resourcePtr = resource.get();
+            auto error = setupPduSessionResource(ue, resourcePtr);
+
             if (error.has_value())
             {
-                auto *tr = asn::New<ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer>();
-                ngap_utils::ToCauseAsn_Ref(error.value(), tr->cause);
-
-                OctetString encodedTr =
-                    ngap_encode::EncodeS(asn_DEF_ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer, tr);
-
-                if (encodedTr.length() == 0)
-                    throw std::runtime_error("PDUSessionResourceSetupUnsuccessfulTransfer encoding failed");
-
-                asn::Free(asn_DEF_ASN_NGAP_PDUSessionResourceSetupUnsuccessfulTransfer, tr);
-
-                auto *res = asn::New<ASN_NGAP_PDUSessionResourceFailedToSetupItemSURes>();
-                res->pDUSessionID = resource->psi;
-                asn::SetOctetString(res->pDUSessionResourceSetupUnsuccessfulTransfer, encodedTr);
-
-                failedList.push_back(res);
+                addFailedItem(resourcePtr->psi, error.value());
             }
             else
             {
+                resource.release();
+
                 if (item->pDUSessionNAS_PDU)
                     deliverDownlinkNas(ue->ctxId, asn::GetOctetString(*item->pDUSessionNAS_PDU));
 
                 auto *tr = asn::New<ASN_NGAP_PDUSessionResourceSetupResponseTransfer>();
+                auto &qosList = resourcePtr->qosFlows->list;
 
-                auto &qosList = resource->qosFlows->list;
                 for (int iQos = 0; iQos < qosList.count; iQos++)
                 {
                     auto *associatedQosFlowItem = asn::New<ASN_NGAP_AssociatedQosFlowItem>();
@@ -144,8 +182,9 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
                 auto &upInfo = tr->dLQosFlowPerTNLInformation.uPTransportLayerInformation;
                 upInfo.present = ASN_NGAP_UPTransportLayerInformation_PR_gTPTunnel;
                 upInfo.choice.gTPTunnel = asn::New<ASN_NGAP_GTPTunnel>();
-                asn::SetBitString(upInfo.choice.gTPTunnel->transportLayerAddress, resource->downTunnel.address);
-                asn::SetOctetString4(upInfo.choice.gTPTunnel->gTP_TEID, (octet4)resource->downTunnel.teid);
+
+                asn::SetBitString(upInfo.choice.gTPTunnel->transportLayerAddress, resourcePtr->downTunnel.address);
+                asn::SetOctetString4(upInfo.choice.gTPTunnel->gTP_TEID, (octet4)resourcePtr->downTunnel.teid);
 
                 OctetString encodedTr =
                     ngap_encode::EncodeS(asn_DEF_ASN_NGAP_PDUSessionResourceSetupResponseTransfer, tr);
@@ -156,7 +195,7 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
                 asn::Free(asn_DEF_ASN_NGAP_PDUSessionResourceSetupResponseTransfer, tr);
 
                 auto *res = asn::New<ASN_NGAP_PDUSessionResourceSetupItemSURes>();
-                res->pDUSessionID = resource->psi;
+                res->pDUSessionID = resourcePtr->psi;
                 asn::SetOctetString(res->pDUSessionResourceSetupResponseTransfer, encodedTr);
 
                 successList.push_back(res);
@@ -215,6 +254,12 @@ void NgapTask::receiveSessionResourceSetupRequest(int amfId, ASN_NGAP_PDUSession
 
 std::optional<NgapCause> NgapTask::setupPduSessionResource(NgapUeContext *ue, PduSessionResource *resource)
 {
+    if (ue->pduSessions.count(resource->psi) != 0)
+    {
+        m_logger->err("PDU session resource could not setup: PDU Session ID[%d] is already active", resource->psi);
+        return NgapCause::Protocol_message_not_compatible_with_receiver_state;
+    }
+
     if (resource->sessionType != PduSessionType::IPv4)
     {
         m_logger->err("PDU session resource could not setup: Only IPv4 is supported");
