@@ -11,12 +11,13 @@
 #include <memory>
 #include <thread>
 #include <ue/nts.hpp>
-#include <ue/tun/task.hpp>
 #include <ue/types.hpp>
 #include <unordered_map>
 #include <utils/logger.hpp>
 #include <utils/nts.hpp>
 #include <vector>
+
+#include <lib/udp/server.hpp>
 
 namespace nr::ue
 {
@@ -27,7 +28,9 @@ class UeAppTask : public NtsTask
     TaskBase *m_base;
     std::unique_ptr<Logger> m_logger;
 
-    std::array<TunTask *, 16> m_tunTasks{};
+    std::unique_ptr<udp::UdpServer> m_agfSender;
+    std::string m_agfIp;
+    uint16_t m_agfPort{};
     ECmState m_cmState{};
 
     friend class UeCmdHandler;
@@ -43,7 +46,7 @@ class UeAppTask : public NtsTask
 
   private:
     void receiveStatusUpdate(NmUeStatusUpdate &msg);
-    void setupTunInterface(const PduSession *pduSession);
+    void notifyControlApp(const PduSession *pduSession);
 };
 
 } // namespace nr::ue

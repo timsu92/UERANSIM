@@ -168,6 +168,12 @@ static nr::ue::UeConfig *ReadConfigYaml()
         result->useNamespace = yaml::GetBool(config, "useNamespace");
     if (yaml::HasField(config, "nsNamePrefix"))
         result->nsNamePrefix = yaml::GetString(config, "nsNamePrefix", 1, 64);
+    if (yaml::HasField(config, "agfControlApp"))
+    {
+        auto agf = config["agfControlApp"];
+        result->agfControlAppIp = yaml::GetIpAddress(agf, "ip");
+        result->agfControlAppPort = static_cast<uint16_t>(yaml::GetInt32(agf, "port", 1, 65535));
+    }
 
     yaml::AssertHasField(config, "integrity");
     yaml::AssertHasField(config, "ciphering");
@@ -369,6 +375,8 @@ static nr::ue::UeConfig *GetConfigByUe(int ueIndex)
     c->tunNetmask = g_refConfig->tunNetmask;
     c->useNamespace = g_refConfig->useNamespace;
     c->nsNamePrefix = g_refConfig->nsNamePrefix;
+    c->agfControlAppIp = g_refConfig->agfControlAppIp;
+    c->agfControlAppPort = g_refConfig->agfControlAppPort;
     c->hplmn = g_refConfig->hplmn;
     c->configuredNssai = g_refConfig->configuredNssai;
     c->defaultConfiguredNssai = g_refConfig->defaultConfiguredNssai;

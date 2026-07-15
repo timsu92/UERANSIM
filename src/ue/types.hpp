@@ -114,6 +114,8 @@ struct UeConfig
     std::optional<std::string> tunNetmask{};
     bool useNamespace{false};
     std::optional<std::string> nsNamePrefix{};
+    std::string agfControlAppIp{"127.0.0.1"};
+    uint16_t agfControlAppPort{9999};
 
     struct
     {
