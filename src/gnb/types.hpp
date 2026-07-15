@@ -330,6 +330,8 @@ struct GnbConfig
     std::string ngapIp{};
     std::string gtpIp{};
     std::optional<std::string> gtpAdvertiseIp{};
+    std::string agfControlAppIp{"127.0.0.1"};
+    uint16_t agfControlAppPort{9999};
     bool ignoreStreamIds{};
     ECellAccessType cellAccessType{ECellAccessType::TerrestrialNr};
 

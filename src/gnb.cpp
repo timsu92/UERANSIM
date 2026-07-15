@@ -55,6 +55,13 @@ static nr::gnb::GnbConfig *ReadConfigYaml()
     if (yaml::HasField(config, "gtpAdvertiseIp"))
         result->gtpAdvertiseIp = yaml::GetIpAddress(config, "gtpAdvertiseIp");
 
+    if (yaml::HasField(config, "agfControlApp"))
+    {
+        auto agf = config["agfControlApp"];
+        result->agfControlAppIp = yaml::GetIpAddress(agf, "ip");
+        result->agfControlAppPort = static_cast<uint16_t>(yaml::GetInt32(agf, "port", 1, 65535));
+    }
+
     result->ignoreStreamIds = yaml::GetBool(config, "ignoreStreamIds");
     result->pagingDrx = EPagingDrx::V128;
     result->name = "UERANSIM-gnb-" + std::to_string(result->plmn.mcc) + "-" + std::to_string(result->plmn.mnc) + "-" +
