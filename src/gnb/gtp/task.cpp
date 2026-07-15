@@ -8,41 +8,33 @@
 
 #include "task.hpp"
 
-#include <gnb/gtp/proto.hpp>
-#include <gnb/rls/task.hpp>
-#include <utils/constants.hpp>
-#include <utils/libc_error.hpp>
-
+#include <asn/ngap/ASN_NGAP_GBR-QosInformation.h>
 #include <asn/ngap/ASN_NGAP_QosFlowSetupRequestItem.h>
+#include <lib/asn/utils.hpp>
+#include <utils/agf_ipc.hpp>
+#include <utils/common.hpp>
 
 namespace nr::gnb
 {
 
 GtpTask::GtpTask(TaskBase *base)
-    : m_base{base}, m_udpServer{}, m_ueContexts{}, m_rateLimiter(std::make_unique<RateLimiter>()), m_pduSessions{},
-      m_sessionTree{}
+    : m_base{base}, m_ueContexts{}, m_rateLimiter(std::make_unique<RateLimiter>()), m_pduSessions{}, m_sessionTree{}
 {
     m_logger = m_base->logBase->makeUniqueLogger("gtp");
+    m_agfIp = m_base->config->agfControlAppIp;
+    m_agfPort = m_base->config->agfControlAppPort;
 }
 
 void GtpTask::onStart()
 {
-    try
-    {
-        m_udpServer = new udp::UdpServerTask(m_base->config->gtpIp, cons::GtpPort, this);
-        m_udpServer->start();
-    }
-    catch (const LibError &e)
-    {
-        m_logger->err("GTP/UDP task could not be created. %s", e.what());
-    }
+    // FORWARDER: no GTP-U socket. Open a fire-and-forget UDP sender to the AGF Control App.
+    m_agfSender = std::make_unique<udp::UdpServer>();
+    m_logger->info("AGF FORWARDER active, IPC target %s:%d", m_agfIp.c_str(), (int)m_agfPort);
 }
 
 void GtpTask::onQuit()
 {
-    m_udpServer->quit();
-    delete m_udpServer;
-
+    m_agfSender.reset();
     m_ueContexts.clear();
 }
 
@@ -77,24 +69,18 @@ void GtpTask::onLoop()
         }
         break;
     }
-    case NtsMessageType::GNB_RLS_TO_GTP: {
-        auto &w = dynamic_cast<NmGnbRlsToGtp &>(*msg);
-        switch (w.present)
-        {
-        case NmGnbRlsToGtp::DATA_PDU_DELIVERY: {
-            handleUplinkData(w.ueId, w.psi, std::move(w.pdu));
-            break;
-        }
-        }
-        break;
-    }
-    case NtsMessageType::UDP_SERVER_RECEIVE:
-        handleUdpReceive(dynamic_cast<udp::NwUdpServerReceive &>(*msg));
-        break;
     default:
         m_logger->unhandledNts(*msg);
         break;
     }
+}
+
+void GtpTask::sendToAgf(const std::string &json)
+{
+    if (!m_agfSender)
+        return;
+    InetAddress to(m_agfIp, m_agfPort);
+    m_agfSender->Send(to, reinterpret_cast<const uint8_t *>(json.data()), json.size());
 }
 
 void GtpTask::handleUeContextUpdate(const GtpUeContextUpdate &msg)
@@ -123,6 +109,30 @@ void GtpTask::handleSessionCreate(PduSessionResource *session)
 
     updateAmbrForUe(session->ueId);
     updateAmbrForSession(sessionInd);
+
+    // Extract QFI + GFBR/MFBR from the first QoS flow (PoC: single flow per session).
+    int qfi = 0;
+    uint64_t gfbrUl = 0, gfbrDl = 0, mfbrUl = 0, mfbrDl = 0;
+    auto &sess = m_pduSessions[sessionInd];
+    if (sess->qosFlows && sess->qosFlows->list.count > 0)
+    {
+        auto *item = sess->qosFlows->list.array[0];
+        qfi = static_cast<int>(item->qosFlowIdentifier);
+        auto *gbr = item->qosFlowLevelQosParameters.gBR_QosInformation;
+        if (gbr != nullptr)
+        {
+            gfbrUl = asn::GetUnsigned64(gbr->guaranteedFlowBitRateUL);
+            gfbrDl = asn::GetUnsigned64(gbr->guaranteedFlowBitRateDL);
+            mfbrUl = asn::GetUnsigned64(gbr->maximumFlowBitRateUL);
+            mfbrDl = asn::GetUnsigned64(gbr->maximumFlowBitRateDL);
+        }
+    }
+
+    std::string upfN3Ip = utils::OctetStringToIp(sess->upTunnel.address);
+    std::string json = agf::BuildSessionSetupJson(session->ueId, session->psi, upfN3Ip, sess->upTunnel.teid,
+                                                   sess->downTunnel.teid, qfi, gfbrUl, gfbrDl, mfbrUl, mfbrDl);
+    sendToAgf(json);
+    m_logger->info("session_setup IPC sent for UE[%d] PSI[%d]", session->ueId, session->psi);
 }
 
 void GtpTask::handleSessionRelease(int ueId, int psi)
@@ -138,6 +148,8 @@ void GtpTask::handleSessionRelease(int ueId, int psi)
     // Remove all session information from rate limiter
     m_rateLimiter->updateSessionUplinkLimit(sessionInd, 0);
     m_rateLimiter->updateUeDownlinkLimit(ueId, 0);
+
+    sendToAgf(agf::BuildSessionReleaseJson(ueId, psi));
 
     // And remove from PDU session table
     if (m_pduSessions.count(sessionInd))
@@ -158,6 +170,8 @@ void GtpTask::handleUeContextDelete(int ueId)
 
     for (auto &session : sessions)
     {
+        sendToAgf(agf::BuildSessionReleaseJson(ueId, GetPsi(session)));
+
         // Remove all session information from rate limiter
         m_rateLimiter->updateSessionUplinkLimit(session, 0);
         m_rateLimiter->updateUeDownlinkLimit(ueId, 0);
@@ -176,92 +190,6 @@ void GtpTask::handleUeContextDelete(int ueId)
 
     // Remove UE context
     m_ueContexts.erase(ueId);
-}
-
-void GtpTask::handleUplinkData(int ueId, int psi, OctetString &&pdu)
-{
-    const uint8_t *data = pdu.data();
-
-    // ignore non IPv4 packets
-    if ((data[0] >> 4 & 0xF) != 4)
-        return;
-
-    uint64_t sessionInd = MakeSessionResInd(ueId, psi);
-
-    if (!m_pduSessions.count(sessionInd))
-    {
-        m_logger->err("Uplink data failure, PDU session not found. UE[%d] PSI[%d]", ueId, psi);
-        return;
-    }
-
-    auto &pduSession = m_pduSessions[sessionInd];
-
-    if (m_rateLimiter->allowUplinkPacket(sessionInd, static_cast<int64_t>(pdu.length())))
-    {
-        gtp::GtpMessage gtp{};
-        gtp.payload = std::move(pdu);
-        gtp.msgType = gtp::GtpMessage::MT_G_PDU;
-        gtp.teid = pduSession->upTunnel.teid;
-
-        auto ul = std::make_unique<gtp::UlPduSessionInformation>();
-        // TODO: currently using first QSI
-        ul->qfi = static_cast<int>(pduSession->qosFlows->list.array[0]->qosFlowIdentifier);
-
-        auto cont = std::make_unique<gtp::PduSessionContainerExtHeader>();
-        cont->pduSessionInformation = std::move(ul);
-        gtp.extHeaders.push_back(std::move(cont));
-
-        OctetString gtpPdu;
-        if (!gtp::EncodeGtpMessage(gtp, gtpPdu))
-            m_logger->err("Uplink data failure, GTP encoding failed");
-        else
-            m_udpServer->send(InetAddress(pduSession->upTunnel.address, cons::GtpPort), gtpPdu);
-    }
-}
-
-void GtpTask::handleUdpReceive(const udp::NwUdpServerReceive &msg)
-{
-    OctetView buffer{msg.packet};
-    auto gtp = gtp::DecodeGtpMessage(buffer);
-
-    switch (gtp->msgType)
-    {
-    case gtp::GtpMessage::MT_G_PDU: {
-        auto sessionInd = m_sessionTree.findByDownTeid(gtp->teid);
-        if (sessionInd == 0)
-        {
-            m_logger->err("TEID %d not found on GTP-U Downlink", gtp->teid);
-            return;
-        }
-
-        if (m_rateLimiter->allowDownlinkPacket(sessionInd, gtp->payload.length()))
-        {
-            auto w = std::make_unique<NmGnbGtpToRls>(NmGnbGtpToRls::DATA_PDU_DELIVERY);
-            w->ueId = GetUeId(sessionInd);
-            w->psi = GetPsi(sessionInd);
-            w->pdu = std::move(gtp->payload);
-            m_base->rlsTask->push(std::move(w));
-        }
-        return;
-    }
-    case gtp::GtpMessage::MT_ECHO_REQUEST: {
-        gtp::GtpMessage gtpResponse{};
-        gtpResponse.msgType = gtp::GtpMessage::MT_ECHO_RESPONSE;
-        gtpResponse.seq = gtp->seq;
-        gtpResponse.payload = OctetString::FromOctet2({14, 0});
-
-        OctetString gtpPdu;
-        if (gtp::EncodeGtpMessage(gtpResponse, gtpPdu))
-            m_udpServer->send(msg.fromAddress, gtpPdu);
-        else
-            m_logger->err("Uplink data failure, GTP encoding failed");
-        return;
-    }
-    default: {
-        m_logger->err("Unhandled GTP-U message type: %d", gtp->msgType);
-        return;
-    }
-    }
 }
 
 void GtpTask::updateAmbrForUe(int ueId)

@@ -16,7 +16,7 @@
 #include <vector>
 
 #include <gnb/nts.hpp>
-#include <lib/udp/server_task.hpp>
+#include <lib/udp/server.hpp>
 #include <utils/logger.hpp>
 #include <utils/nts.hpp>
 
@@ -29,7 +29,9 @@ class GtpTask : public NtsTask
     TaskBase *m_base;
     std::unique_ptr<Logger> m_logger;
 
-    udp::UdpServerTask *m_udpServer;
+    std::unique_ptr<udp::UdpServer> m_agfSender;
+    std::string m_agfIp;
+    uint16_t m_agfPort{};
     std::unordered_map<int, std::unique_ptr<GtpUeContext>> m_ueContexts;
     std::unique_ptr<IRateLimiter> m_rateLimiter;
     std::unordered_map<uint64_t, std::unique_ptr<PduSessionResource>> m_pduSessions;
@@ -47,12 +49,11 @@ class GtpTask : public NtsTask
     void onQuit() override;
 
   private:
-    void handleUdpReceive(const udp::NwUdpServerReceive &msg);
+    void sendToAgf(const std::string &json);
     void handleUeContextUpdate(const GtpUeContextUpdate &msg);
     void handleSessionCreate(PduSessionResource *session);
     void handleSessionRelease(int ueId, int psi);
     void handleUeContextDelete(int ueId);
-    void handleUplinkData(int ueId, int psi, OctetString &&data);
 
     void updateAmbrForUe(int ueId);
     void updateAmbrForSession(uint64_t pduSession);
