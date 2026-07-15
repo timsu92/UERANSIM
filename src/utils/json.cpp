@@ -54,8 +54,6 @@ static std::string EscapeJson(const std::string &str)
 
 static void AppendJson(const Json &json, std::stringstream &stream, int indentation)
 {
-    std::string indent(indentation, ' ');
-
     switch (json.type())
     {
     case Json::Type::NULL_TYPE:
@@ -69,35 +67,30 @@ static void AppendJson(const Json &json, std::stringstream &stream, int indentat
         stream << json.str();
         break;
     case Json::Type::OBJECT: {
-        stream << "{\n";
+        stream << "{";
         int index = 0;
         for (auto &item : json)
         {
-            stream << indent << " " << item.first << ": ";
+            stream << "\"" << EscapeJson(item.first) << "\":";
             AppendJson(item.second, stream, indentation + 1);
-            if (index == json.itemCount() - 1)
-                stream << "\n";
-            else
-                stream << ",\n";
+            if (index != json.itemCount() - 1)
+                stream << ",";
             index++;
         }
-        stream << indent << "}";
+        stream << "}";
         break;
     }
     case Json::Type::ARRAY: {
-        stream << "[\n";
+        stream << "[";
         int index = 0;
         for (auto &item : json)
         {
-            stream << indent << " ";
             AppendJson(item.second, stream, indentation + 1);
-            if (index == json.itemCount() - 1)
-                stream << "\n";
-            else
-                stream << ",\n";
+            if (index != json.itemCount() - 1)
+                stream << ",";
             index++;
         }
-        stream << indent << "]";
+        stream << "]";
         break;
     }
     }

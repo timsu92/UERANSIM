@@ -54,5 +54,5 @@ target_link_libraries(nr-cli common-lib)
 
 #################### AGF IPC TEST ####################
 add_executable(agf-ipc-test tests/agf_ipc_test.cpp)
-target_compile_options(agf-ipc-test PRIVATE -Wall -Wextra -pedantic)
+target_compile_options(agf-ipc-test PRIVATE -Wall -Wextra -pedantic -UNDEBUG)
 target_link_libraries(agf-ipc-test utils)
