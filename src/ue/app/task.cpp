@@ -77,6 +77,9 @@ void UeAppTask::onLoop()
             setTimer(SWITCH_OFF_TIMER_ID, SWITCH_OFF_DELAY);
             break;
         }
+        default:
+            m_logger->debug("Ignoring NAS-to-App message [%d] (no data plane)", static_cast<int>(w.present));
+            break;
         }
         break;
     }
