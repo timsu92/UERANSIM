@@ -54,6 +54,7 @@ void UeAppTask::onStart()
     m_agfIp = m_base->config->agfControlAppIp;
     m_agfPort = m_base->config->agfControlAppPort;
     m_agfSender = std::make_unique<udp::UdpServer>();
+    m_logger->info("AGF notifier active, IPC target %s:%d", m_agfIp.c_str(), (int)m_agfPort);
 }
 
 void UeAppTask::onQuit()
