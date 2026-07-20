@@ -30,11 +30,26 @@ App", which owns the actual user-plane (OVS/OpenFlow). See the superproject
     data and no GTP-U socket to receive echoes on.
   - **Changed:** `handleSessionCreate` now parses QFI and, if present,
     `ASN_NGAP_GBR_QosInformation` (`guaranteedFlowBitRateUL/DL`,
-    `maximumFlowBitRateUL/DL`) from the first QoS flow, and sends
-    `session_setup` JSON (UPF N3 IP, UL/DL TEID, QFI, GFBR/MFBR) instead of
-    programming a tunnel. `handleSessionRelease` and `handleUeContextDelete`
-    now send `session_release` JSON in addition to their existing
-    bookkeeping cleanup.
+    `maximumFlowBitRateUL/DL`), and sends `session_setup` JSON (UPF N3 IP,
+    UL/DL TEID, QFI, GFBR/MFBR) instead of programming a tunnel.
+    `handleSessionRelease` and `handleUeContextDelete` now send
+    `session_release` JSON in addition to their existing bookkeeping
+    cleanup.
+  - **Fixed (2026-07-20):** free5GC's SMF returns *two*
+    `QosFlowSetupRequestItem`s for a GBR PDU session — a first one (lowest
+    QFI) with the requested 5QI but no `gBR_QosInformation` IE, and a
+    second one that carries the real GFBR/MFBR values. The original "PoC:
+    single flow per session" code always took `array[0]`, so every GBR
+    session silently degraded to the AMBR/link ceiling instead of its
+    guaranteed rate. `handleSessionCreate` now scans all flows and prefers
+    whichever one has `gBR_QosInformation != nullptr`, falling back to
+    `array[0]` (old behavior) when none do — the normal non-GBR case.
+    Found while running the AGF superproject's Plan 6 Task 8 QoS smoke
+    test end-to-end against a real free5GC GBR subscriber. This is a
+    heuristic scoped to sessions with at most one dedicated GBR flow — it
+    does not generalize to 3GPP's default+multiple-dedicated-flow QoS
+    model, since this IPC message still carries only one qfi/rate tuple
+    per session regardless of flow count (see superproject spec §19 N2).
   - **Kept, still load-bearing:** `handleSessionCreate` still calls
     `m_sessionTree.insert(...)` and populates `m_pduSessions[...]`, and
     `handleUeContextUpdate`/`handleSessionCreate` still call
