@@ -110,13 +110,29 @@ void GtpTask::handleSessionCreate(PduSessionResource *session)
     updateAmbrForUe(session->ueId);
     updateAmbrForSession(sessionInd);
 
-    // Extract QFI + GFBR/MFBR from the first QoS flow (PoC: single flow per session).
+    // Extract QFI + GFBR/MFBR from the QoS flow that actually carries
+    // gBR_QosInformation (spike finding, Plan 6 Task 8): free5GC's SMF returns
+    // *two* QosFlowSetupRequestItems for a GBR PDU session -- a first one
+    // (lowest QFI) with the requested 5QI but no GBR IE, and a second one that
+    // carries the real GFBR/MFBR values. Blindly taking array[0] (the original
+    // "PoC: single flow per session" assumption) always saw the GBR-less flow
+    // and silently degraded every GBR session to the AMBR/link ceiling. Prefer
+    // whichever flow has gBR_QosInformation; fall back to the first flow (old
+    // behavior) when none do, which is the normal non-GBR case.
     int qfi = 0;
     uint64_t gfbrUl = 0, gfbrDl = 0, mfbrUl = 0, mfbrDl = 0;
     auto &sess = m_pduSessions[sessionInd];
     if (sess->qosFlows && sess->qosFlows->list.count > 0)
     {
         auto *item = sess->qosFlows->list.array[0];
+        for (int i = 0; i < static_cast<int>(sess->qosFlows->list.count); i++)
+        {
+            if (sess->qosFlows->list.array[i]->qosFlowLevelQosParameters.gBR_QosInformation != nullptr)
+            {
+                item = sess->qosFlows->list.array[i];
+                break;
+            }
+        }
         qfi = static_cast<int>(item->qosFlowIdentifier);
         auto *gbr = item->qosFlowLevelQosParameters.gBR_QosInformation;
         if (gbr != nullptr)
